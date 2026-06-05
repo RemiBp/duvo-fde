@@ -14,7 +14,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=duvouser:duvogroup server.py .
-COPY --chown=duvouser:duvogroup secrets/store-keys.example.json secrets/store-keys.json
 
 USER duvouser
 

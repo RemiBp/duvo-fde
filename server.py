@@ -10,18 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
-from pathlib import Path
-
 from mcp.server.fastmcp import FastMCP
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_KEYS_PATH = PROJECT_ROOT / "secrets" / "store-keys.json"
-FALLBACK_KEYS_PATH = PROJECT_ROOT / "secrets" / "store-keys.example.json"
-
-# Stub: keys ending with this suffix simulate StoreLink 401 after vault reload.
-STALE_KEY_SUFFIX = "-stale"
 
 # ---------------------------------------------------------------------------
 # Step 3 — observability (stderr ONLY; stdout is MCP JSON-RPC)
@@ -64,120 +54,12 @@ def log_buyer_audit(store_id: int, action: str, details: str) -> None:
 # Step 4 — per-store credential vault (Korral IT rotates weekly)
 # ---------------------------------------------------------------------------
 
+VAULT_CREDENTIAL_REGISTRY: dict[int, str] = {
+    47: "key_store_47_valid",
+    102: "key_store_102_valid",
+}
 
-class KeyStore:
-    """Per-store StoreLink API keys loaded from a mounted JSON vault."""
-
-    def __init__(self, keys_path: Path) -> None:
-        self._keys_path = keys_path
-        self._keys: dict[str, dict[str, str]] = {}
-
-    def load(self) -> None:
-        path = self._keys_path
-        if not path.is_file() and path == DEFAULT_KEYS_PATH and FALLBACK_KEYS_PATH.is_file():
-            path = FALLBACK_KEYS_PATH
-
-        if not path.is_file():
-            self._keys = {}
-            return
-
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        next_keys: dict[str, dict[str, str]] = {}
-        for store_id, value in raw.items():
-            if isinstance(value, str):
-                next_keys[store_id] = {"current": value}
-            elif isinstance(value, dict) and isinstance(value.get("current"), str):
-                next_keys[store_id] = dict(value)
-        self._keys = next_keys
-
-    def reload(self) -> None:
-        self.load()
-        logger.info(
-            "secrets.reloaded",
-            extra={
-                "store_id": "—",  # noqa: RUF001
-            },
-        )
-
-    def has_store(self, store_id: int) -> bool:
-        return str(store_id) in self._keys
-
-    def configured_store_ids(self) -> list[int]:
-        ids: list[int] = []
-        for key in self._keys:
-            try:
-                ids.append(int(key))
-            except ValueError:
-                continue
-        return sorted(ids)
-
-    def get_key(self, store_id: int) -> str | None:
-        record = self._keys.get(str(store_id))
-        if not record:
-            return None
-        return record.get("current")
-
-
-def _keys_path() -> Path:
-    raw = os.environ.get("STORE_KEYS_PATH", "").strip()
-    if raw:
-        path = Path(raw)
-        return path if path.is_absolute() else PROJECT_ROOT / path
-    return DEFAULT_KEYS_PATH
-
-
-VAULT = KeyStore(_keys_path())
-VAULT.load()
-logger.info(
-    "secrets.loaded",
-    extra={
-        "store_id": "—",  # noqa: RUF001
-    },
-)
-
-
-def fail_api_key_rotated(store_id: int) -> None:
-    """Raise after StoreLink 401 persists post-reload (harness + production path)."""
-    logger.warning(
-        "Mid-flight API key rotation detected.",
-        extra={"store_id": store_id},
-    )
-    raise PermissionError(
-        f"API_KEY_ROTATED: Token for Store {store_id} expired mid-flight. "
-        "Refresh from vault and retry."
-    )
-
-
-def fail_critical_auth(store_id: int) -> None:
-    """Raise when no vault credential exists for the requested store."""
-    logger.error(
-        "Unauthorized store lookup — store missing from credential registry.",
-        extra={"store_id": store_id},
-    )
-    raise ValueError(
-        f"CRITICAL_AUTH_FAILURE: Store {store_id} missing from credential registry. "
-        "Contact Korral IT to register store keys."
-    )
-
-
-def resolve_store_key(store_id: int) -> str:
-    """
-    Load per-store key from vault. Simulates rotation retry when key is stale:
-    reload vault once, then fail closed with API_KEY_ROTATED.
-    """
-    key = VAULT.get_key(store_id)
-    if key is None:
-        fail_critical_auth(store_id)
-
-    assert key is not None
-    if key.endswith(STALE_KEY_SUFFIX):
-        VAULT.reload()
-        key = VAULT.get_key(store_id)
-        if key is None or key.endswith(STALE_KEY_SUFFIX):
-            fail_api_key_rotated(store_id)
-
-    return key
-
+ROTATE_TRIGGER_KEY = "rotate_trigger_key"
 
 # ---------------------------------------------------------------------------
 # Stub StoreLink state (Step 1 + official buyer task demo)
@@ -196,6 +78,33 @@ SKU_CATALOG: dict[int, str] = {
 }
 
 
+def enforce_security_boundary(store_id: int, auth_key: str) -> None:
+    """Step 4: fail closed on unknown store, rotation mid-flight, or bad token."""
+    if store_id not in VAULT_CREDENTIAL_REGISTRY:
+        logger.error(
+            "Unauthorized store lookup — store missing from credential registry.",
+            extra={"store_id": store_id},
+        )
+        raise ValueError(
+            f"CRITICAL_AUTH_FAILURE: Store {store_id} missing from credential registry. "
+            "Contact Korral IT to register store keys."
+        )
+
+    if auth_key == ROTATE_TRIGGER_KEY:
+        logger.warning(
+            "Mid-flight API key rotation detected.",
+            extra={"store_id": store_id},
+        )
+        raise PermissionError(
+            f"API_KEY_ROTATED: Token for Store {store_id} expired mid-flight. "
+            "Refresh from vault and retry."
+        )
+
+    if VAULT_CREDENTIAL_REGISTRY[store_id] != auth_key:
+        logger.error("Token mismatch for store.", extra={"store_id": store_id})
+        raise PermissionError(f"UNAUTHORIZED: Invalid token for Store {store_id}.")
+
+
 def _sku_row(store_id: int, sku: int) -> dict[str, int]:
     return STORELINK_DB.get(store_id, {}).get(sku, {"on_hand": 0, "pos_24h": 0})
 
@@ -206,6 +115,7 @@ def _sku_row(store_id: int, sku: int) -> dict[str, int]:
 
 app = FastMCP("duvo-korral-storelink-server")
 
+# Re-apply stderr logging after FastMCP init (SDK may configure its own handlers).
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [FDE-DEBUG] [Store: %(store_id)s] %(message)s",
@@ -219,13 +129,13 @@ logger.addFilter(_StoreContextFilter())
     name="get_store_inventory",
     description=(
         "Returns current on-hand stock for a SKU at a Korral store. "
-        "Auth is server-side (per-store vault); agent passes store_id only. "
+        "Requires per-store auth_key from Korral IT vault. "
         "Returns JSON with fields: store_id (int), sku (int), on_hand (int units)."
     ),
 )
-def get_store_inventory(store_id: int, sku: int) -> str:
+def get_store_inventory(store_id: int, sku: int, auth_key: str) -> str:
     """Look up on-hand quantity for one SKU at one store."""
-    resolve_store_key(store_id)
+    enforce_security_boundary(store_id, auth_key)
     logger.info(f"Inventory lookup SKU {sku}", extra={"store_id": store_id})
     data = _sku_row(store_id, sku)
     return json.dumps({"store_id": store_id, "sku": sku, "on_hand": data["on_hand"]})
@@ -235,13 +145,13 @@ def get_store_inventory(store_id: int, sku: int) -> str:
     name="get_store_pos_24h",
     description=(
         "Returns last-24-hour POS transaction volume for a SKU at a store. "
-        "Auth is server-side (per-store vault). "
+        "Requires per-store auth_key. "
         "Returns JSON with fields: store_id, sku, pos_transactions_24h (int units sold)."
     ),
 )
-def get_store_pos_24h(store_id: int, sku: int) -> str:
+def get_store_pos_24h(store_id: int, sku: int, auth_key: str) -> str:
     """Look up 24h POS sold units for one SKU at one store."""
-    resolve_store_key(store_id)
+    enforce_security_boundary(store_id, auth_key)
     logger.info(f"POS 24h lookup SKU {sku}", extra={"store_id": store_id})
     data = _sku_row(store_id, sku)
     return json.dumps(
@@ -257,14 +167,16 @@ def get_store_pos_24h(store_id: int, sku: int) -> str:
     name="create_replenishment_order",
     description=(
         "Raises a replenishment order at StoreLink for a SKU quantity. "
-        "Auth is server-side (per-store vault). Call only when gap "
-        "(pos_24h − on_hand) exceeds the buyer threshold (typically 6 units). "
+        "Requires per-store auth_key. Call only when gap (pos_24h − on_hand) exceeds "
+        "the buyer threshold (typically 6 units). "
         "Returns JSON with status, order_id, quantity_dispatched."
     ),
 )
-def create_replenishment_order(store_id: int, sku: int, quantity: int) -> str:
+def create_replenishment_order(
+    store_id: int, sku: int, quantity: int, auth_key: str
+) -> str:
     """Dispatch a replenishment order after auth and audit logging."""
-    resolve_store_key(store_id)
+    enforce_security_boundary(store_id, auth_key)
     product = SKU_CATALOG.get(sku, f"SKU {sku}")
     logger.info(
         f"Replenishment order {quantity} units SKU {sku}",

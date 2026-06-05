@@ -2,19 +2,19 @@
 
 Custom [Model Context Protocol](https://modelcontextprotocol.io) server that lets a Duvo agent perform a Korral category buyer's job on top of StoreLink. The server runs inside Korral's private GCP network over **stdio JSON-RPC** — no inbound TCP ports.
 
-**Customer context:** Korral operates ~180 stores and ~18k SKUs. StoreLink is the internal inventory and replenishment API. This pilot stubs StoreLink with representative butter-SKU data; the agent-facing contract is production-grade.
+**Context:** Korral operates ~180 stores and ~18k SKUs. StoreLink is the internal inventory and replenishment API. This pilot stubs StoreLink with representative butter-SKU data; the agent-facing contract is production-grade.
 
 ---
 
 ## MCP tools (Step 1)
 
-Three granular primitives — not a monolith. **Auth is server-side** (agent passes business args only).
+Three granular primitives — not a monolith. Every store-scoped call requires a per-store `auth_key` from Korral IT's vault.
 
-| Tool | Purpose | Key inputs | Returns |
-|------|---------|------------|---------|
-| `get_store_inventory` | Current on-hand stock for one SKU at one store | `store_id`, `sku` | `on_hand` (units) |
-| `get_store_pos_24h` | Last 24h POS volume for one SKU | `store_id`, `sku` | `pos_transactions_24h` (units sold) |
-| `create_replenishment_order` | Raise a replenishment order | `store_id`, `sku`, `quantity` | `order_id`, `status`, `quantity_dispatched` |
+| Tool | Purpose | Inputs | Returns |
+|------|---------|--------|---------|
+| `get_store_inventory` | Current on-hand stock for one SKU at one store | `store_id`, `sku`, `auth_key` | `store_id`, `sku`, `on_hand` |
+| `get_store_pos_24h` | Last 24h POS volume for one SKU | `store_id`, `sku`, `auth_key` | `store_id`, `sku`, `pos_transactions_24h` |
+| `create_replenishment_order` | Raise a replenishment order | `store_id`, `sku`, `quantity`, `auth_key` | `status`, `order_id`, `quantity_dispatched` |
 
 Docstrings describe return fields explicitly so the LLM does not hallucinate response shape.
 
@@ -24,10 +24,10 @@ Docstrings describe return fields explicitly so the LLM does not hallucinate res
 
 | Omitted | Why |
 |---------|-----|
-| **HTTP passthrough** | Exposing raw StoreLink HTTP would bypass buyer semantics and leak internal API surface to the agent. |
+| **HTTP passthrough** | Raw StoreLink HTTP would bypass buyer semantics and expose internal API surface to the agent. |
 | **Bulk / all-store scans** | Pollutes LLM context; buyers work store-by-store on targeted SKUs. |
-| **Monolithic `analyze_and_order()`** | Hides reasoning; the agent should chain lookups and decide like a human buyer. |
-| **Server-side gap formula** | Gap logic (`pos_24h − on_hand > threshold`) lives in agent reasoning, not a hidden smart endpoint. |
+| **Monolithic `analyze_and_order()`** | Hides reasoning; the agent chains lookups and decides like a human buyer. |
+| **Server-side gap formula** | Gap logic (`pos_transactions_24h − on_hand > 6`) lives in agent reasoning, not a hidden smart endpoint. |
 
 ---
 
@@ -57,19 +57,22 @@ Official buyer task: check stores **47** and **102**; order when gap exceeds **6
 
 ## Secrets & auth (Step 4)
 
-Per-store keys load from `secrets/store-keys.json` (override with `STORE_KEYS_PATH`). The server resolves credentials internally via `resolve_store_key(store_id)` — **keys never appear on the MCP tool surface**.
+`enforce_security_boundary(store_id, auth_key)` runs on every tool call before business logic.
 
-| Store | Vault key (server-side only) |
-|-------|------------------------------|
+| Store | Vault key |
+|-------|-----------|
 | 47 | `key_store_47_valid` |
 | 102 | `key_store_102_valid` |
 
 **Failure modes (fail closed):**
 
-- Unknown `store_id` → `ValueError` (`CRITICAL_AUTH_FAILURE`)
-- Stale key after vault reload → `PermissionError` (`API_KEY_ROTATED`) — simulates Korral IT weekly rotation mid-flight
+| Condition | Exception | Code |
+|-----------|-----------|------|
+| Unknown `store_id` | `ValueError` | `CRITICAL_AUTH_FAILURE` |
+| `auth_key == rotate_trigger_key` | `PermissionError` | `API_KEY_ROTATED` (weekly rotation mid-flight) |
+| Token mismatch | `PermissionError` | `UNAUTHORIZED` |
 
-Copy `secrets/store-keys.example.json` → `secrets/store-keys.json` for local dev. In GCP, Korral IT mounts the vault from Secret Manager.
+In production, Korral IT mounts per-store keys from GCP Secret Manager. This pilot uses an in-memory `VAULT_CREDENTIAL_REGISTRY` in `server.py`.
 
 ---
 
@@ -91,7 +94,7 @@ Requires **Python 3.10+** (MCP SDK dependency).
 python3 test_harness.py 2>&1
 ```
 
-`2>&1` merges stderr so FDE logs and `[BUYER AUDIT]` lines appear alongside harness output.
+`2>&1` merges stderr so FDE logs and `[BUYER AUDIT]` lines appear alongside harness output. Expects order on store 47 only, security tests for rotation and unknown store.
 
 ### MCP server (stdio)
 
@@ -131,4 +134,5 @@ Non-root `duvouser` / `duvogroup`, `PYTHONUNBUFFERED=1`, stdio entrypoint — se
 | `server.py` | MCP server — tools, auth, observability, stub data |
 | `test_harness.py` | Buyer task simulation + security tests |
 | `Dockerfile` | Non-root container image for GCP |
+| `DEPLOYMENT.md` | How Korral IT runs the server in isolated GCP |
 | `requirements.txt` | `mcp`, `pydantic` |

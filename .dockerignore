@@ -3,8 +3,7 @@ __pycache__
 *.pyc
 .git
 logs/
-secrets/*
-!secrets/store-keys.example.json
+secrets/
 *.md
 test_harness.py
 fixtures/

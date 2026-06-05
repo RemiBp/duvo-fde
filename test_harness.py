@@ -22,13 +22,13 @@ os.chdir(ROOT)
 
 from server import (  # noqa: E402
     create_replenishment_order,
-    fail_api_key_rotated,
     get_store_inventory,
     get_store_pos_24h,
 )
 
 TARGET_SKU = 8847291
 TARGET_STORES = [47, 102]
+VAULT_KEYS = {47: "key_store_47_valid", 102: "key_store_102_valid"}
 THRESHOLD = 6
 
 
@@ -45,18 +45,18 @@ def run_integration_test_harness() -> None:
     _p("DUVO AGENT — OFFICIAL BUYER TASK SIMULATION")
     _p("Task: SKU 8847291 @ stores 47, 102 | threshold = 6")
     _p("Gap formula: pos_transactions_24h - on_hand")
-    _p("Auth: server-side vault (no auth_key on tool surface)")
     _p("=" * 60)
 
     for store_id in TARGET_STORES:
         _p(f"\n[WORKFLOW] Store {store_id}")
 
-        inv = json.loads(get_store_inventory(store_id, TARGET_SKU))
+        inv = json.loads(get_store_inventory(store_id, TARGET_SKU, VAULT_KEYS[store_id]))
         on_hand = inv["on_hand"]
 
-        pos = json.loads(get_store_pos_24h(store_id, TARGET_SKU))
+        pos = json.loads(get_store_pos_24h(store_id, TARGET_SKU, VAULT_KEYS[store_id]))
         sold_24h = pos["pos_transactions_24h"]
 
+        # Official rule: gap = pos_transactions_24h - on_hand; order only if gap > 6
         gap = sold_24h - on_hand
         _p(f"  Metrics: on_hand={on_hand} | pos_24h={sold_24h} | gap={gap}")
 
@@ -65,11 +65,14 @@ def run_integration_test_harness() -> None:
             stderr_capture = io.StringIO()
             with redirect_stderr(stderr_capture):
                 order = json.loads(
-                    create_replenishment_order(store_id, TARGET_SKU, gap)
+                    create_replenishment_order(
+                        store_id, TARGET_SKU, gap, VAULT_KEYS[store_id]
+                    )
                 )
             audit_text = stderr_capture.getvalue()
             if store_id == 47 and "[BUYER AUDIT]" in audit_text and '"STORE_ID": 47' in audit_text:
                 buyer_audit_for_47 = True
+            # Still emit captured stderr so 2>&1 shows audit + FDE logs
             sys.stderr.write(audit_text)
             sys.stderr.flush()
 
@@ -90,9 +93,9 @@ def run_integration_test_harness() -> None:
     _p("STEP 4 — SECURITY FAIL-SAFE TESTS")
     _p("=" * 60)
 
-    _p("\n[TEST A] Mid-flight key rotation (store 47, post-reload failure)...")
+    _p("\n[TEST A] Mid-flight key rotation (store 47 + rotate_trigger_key)...")
     try:
-        fail_api_key_rotated(47)
+        get_store_inventory(47, TARGET_SKU, "rotate_trigger_key")
         _p("  FAIL: should have raised PermissionError")
         sys.exit(1)
     except PermissionError as ex:
@@ -103,7 +106,7 @@ def run_integration_test_harness() -> None:
 
     _p("\n[TEST B] Unmapped store (999)...")
     try:
-        get_store_inventory(999, TARGET_SKU)
+        get_store_inventory(999, TARGET_SKU, "any_token")
         _p("  FAIL: should have raised ValueError")
         sys.exit(1)
     except ValueError as ex:
