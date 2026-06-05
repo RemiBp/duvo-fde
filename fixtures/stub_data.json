@@ -1,0 +1,36 @@
+{
+  "stores": [
+    { "store_id": 47, "name": "Korral Lyon Part-Dieu", "region": "Auvergne-Rhône-Alpes" },
+    { "store_id": 102, "name": "Korral Paris Bastille", "region": "Île-de-France" },
+    { "store_id": 12, "name": "Korral Bordeaux Centre", "region": "Nouvelle-Aquitaine" }
+  ],
+  "suppliers": {
+    "SUP-441": {
+      "supplier_id": "SUP-441",
+      "name": "Madeta SA",
+      "lead_time_days": 2,
+      "region": "Poland"
+    }
+  },
+  "skus": {
+    "8847291": {
+      "sku": "8847291",
+      "name": "Madeta butter 250g",
+      "category": "Dairy",
+      "supplier_id": "SUP-441",
+      "supplier_name": "Madeta SA",
+      "supplier_lead_time_days": 2,
+      "pack_size": "250g"
+    }
+  },
+  "inventory": {
+    "47:8847291": 12,
+    "102:8847291": 15,
+    "12:8847291": 8
+  },
+  "pos_24h": {
+    "47:8847291": { "sold_units": 20, "last_sale_at": "2026-05-29T08:42:00+02:00" },
+    "102:8847291": { "sold_units": 17, "last_sale_at": "2026-05-29T09:15:00+02:00" },
+    "12:8847291": { "sold_units": 5, "last_sale_at": "2026-05-28T17:30:00+02:00" }
+  }
+}

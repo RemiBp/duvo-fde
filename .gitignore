@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.py[cod]
+.Python
+.env
+logs/*.jsonl
+secrets/store-keys.json

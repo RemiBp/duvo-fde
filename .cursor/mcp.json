@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "korral-storelink": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/python3",
+      "args": ["${workspaceFolder}/server.py"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}

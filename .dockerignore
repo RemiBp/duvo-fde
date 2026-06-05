@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+.git
+logs/
+secrets/*
+!secrets/store-keys.example.json
+*.md
+test_harness.py
+fixtures/
+scripts/
+tests/
+src/
